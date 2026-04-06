@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml
+#
+# Spins up:
+#   postgres  — sample e-commerce DB, pre-loaded via sample_db_init.sql
+#   env       — sql_optimizer OpenEnv server
+#
+# Usage:
+#   docker-compose up --build
+#
+# Agent connects to:  http://localhost:8000
+# Sample DB URL:      postgresql://sqlopt:sqlopt@postgres:5432/sqlopt
+#
+# For local testing outside Docker use:
+#   postgresql://sqlopt:sqlopt@localhost:5432/sqlopt
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: sql_optimizer_db
+    environment:
+      POSTGRES_USER: sqlopt
+      POSTGRES_PASSWORD: sqlopt
+      POSTGRES_DB: sqlopt
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sample_db_init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sqlopt -d sqlopt"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  env:
+    build:
+      context: .        # sql_optimizer/ folder is the build context
+      dockerfile: server/Dockerfile
+    container_name: sql_optimizer_env
+    ports:
+      - "8000:8000"
+    environment:
+      WORKERS: "4"
+      MAX_STEPS: "10"
+      QUERY_TIMEOUT_MS: "30000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
