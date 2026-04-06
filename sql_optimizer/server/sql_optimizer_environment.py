@@ -107,7 +107,11 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
         # Discover indexes from pg_catalog
         self._available_indexes = self._db.get_available_indexes()
 
-        # Measure baseline
+        # Warm up the Postgres cache so the baseline is measured accurately from RAM
+        self._db.get_explain_plan(self._original_query)
+        self._db.get_explain_plan(self._original_query)
+
+        # Measure true baseline
         plan = self._db.get_explain_plan(self._original_query)
         self._baseline_time_ms = plan.get("Execution Time", 999999.0)
         self._current_time_ms  = self._baseline_time_ms
@@ -471,16 +475,19 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
         if not tree.find(exp.Star):
             return sql
 
-        tables = [t.name for t in tree.find_all(exp.Table)]
         explicit = []
 
-        for table in tables:
-            columns = self._db.get_column_names(table)
+        # Iterate over the table nodes to grab both name AND alias
+        for t in tree.find_all(exp.Table):
+            table_name = t.name
+            alias_name = t.alias if t.alias else table_name
+            
+            columns = self._db.get_column_names(table_name)
             for col_name in columns:
                 explicit.append(
                     exp.Column(
                         this=exp.Identifier(this=col_name),
-                        table=exp.Identifier(this=table),
+                        table=exp.Identifier(this=alias_name),
                     )
                 )
 
