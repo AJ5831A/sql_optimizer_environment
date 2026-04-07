@@ -24,10 +24,12 @@ services:
       POSTGRES_PASSWORD: sqlopt
       POSTGRES_DB: sqlopt
     ports:
-      - "5432:5432"
+      # Host port 5433 → container 5432 (5432 is taken by a native Postgres on this Mac).
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./sample_db_init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      # NOTE: 01_init.sql is baked into the image via db.Dockerfile.
+      # Bind-mounting a single file on macOS hits a VirtioFS deadlock bug.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sqlopt -d sqlopt"]
       interval: 5s
