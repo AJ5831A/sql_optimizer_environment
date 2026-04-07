@@ -2,24 +2,23 @@
 # docker-compose.yml
 #
 # Spins up:
-#   postgres  — sample e-commerce DB, pre-loaded via sample_db_init.sql
-#   env       — sql_optimizer OpenEnv server
+#   postgres — custom DB with pg_hint_plan extension pre-loaded
+#   env      — sql_optimizer OpenEnv server
 #
 # Usage:
-#   docker-compose up --build
-#
-# Agent connects to:  http://localhost:8000
-# Sample DB URL:      postgresql://sqlopt:sqlopt@postgres:5432/sqlopt
-#
-# For local testing outside Docker use:
-#   postgresql://sqlopt:sqlopt@localhost:5432/sqlopt
+#   docker-compose down -v  <-- RUN THIS ONCE to clear the old database!
+#   docker-compose up -d --build
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
 
   postgres:
-    image: postgres:16
+    build:
+      context: .
+      dockerfile: db.Dockerfile
     container_name: sql_optimizer_db
+    # Force Postgres to load the hint plan extension into shared memory
+    command: ["postgres", "-c", "shared_preload_libraries=pg_hint_plan"]
     environment:
       POSTGRES_USER: sqlopt
       POSTGRES_PASSWORD: sqlopt
@@ -38,7 +37,7 @@ services:
   env:
     build:
       context: .
-      dockerfile: sql_optimizer/server/Dockerfile    # ← fixed path
+      dockerfile: sql_optimizer/server/Dockerfile
     container_name: sql_optimizer_env
     ports:
       - "8000:8000"

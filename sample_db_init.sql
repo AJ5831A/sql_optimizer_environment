@@ -9,6 +9,9 @@
 --   or loaded automatically by docker-compose via initdb
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Enable the hint plan extension
+CREATE EXTENSION IF NOT EXISTS pg_hint_plan;
+
 -- ── Schema ────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS regions (

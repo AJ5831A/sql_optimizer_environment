@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import sqlglot
 import sqlglot.expressions as exp
+from sqlglot.expressions.core import Expression
 
 from openenv.core.env_server import Environment
 
@@ -119,9 +120,9 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
         return self._build_observation(plan=plan, reward=0.0, done=False)
 
     def step(
-        self, 
-        action: SQLAction, 
-        timeout_s: Optional[float] = None, 
+        self,
+        action: SQLAction,
+        timeout_s: Optional[float] = None,
         **kwargs: Any
     ) -> SQLObservation:
         """
@@ -212,7 +213,7 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
         self, sql: str, plan: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         try:
-            tree = sqlglot.parse_one(sql, dialect="postgres")
+            tree = sqlglot.parse_one(sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE)
         except Exception:
             return [{
                 "action_id": 9,
@@ -357,7 +358,7 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
         if stripped.startswith("/*+"):
             closing = stripped.index("*/")
             return stripped[:closing].rstrip() + f" {new_hint}" + stripped[closing:]
-        return f"/*+ {new_hint} */\n{sql}"
+        return f"/*+ {new_hint} */\n{stripped}"
 
     def _add_index_hint(self, sql: str, table: str, index: str, **_) -> str:
         return self._add_hint_comment(sql, f"IndexScan({table} {index})")
@@ -371,37 +372,54 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
         return self._add_hint_comment(sql, f"{method}({table_a} {table_b})")
 
     def _push_predicate(self, sql: str, target_table: str, **_) -> str:
-        tree = sqlglot.parse_one(sql, dialect="postgres")
+        hint_prefix, clean_sql = self._split_hint(sql)
+
+        tree = sqlglot.parse_one(clean_sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE)
         where = tree.find(exp.Where)
         if not where:
             return sql
 
         to_push = []
-        for cond in list(where.find_all(exp.EQ)):
+        for cond in where.find_all(exp.EQ):
             col = cond.find(exp.Column)
             if col and col.table == target_table:
                 to_push.append(cond.copy())
-                cond.pop()
 
         if not to_push:
             return sql
+
+        def remove_pushed(node: Expression) -> Optional[Expression]:
+            if isinstance(node, exp.EQ):
+                col = node.find(exp.Column)
+                if col and col.table == target_table:
+                    return None
+            return node
+
+        new_where_expr = where.this.transform(remove_pushed)
+        if new_where_expr is None:
+            where.pop()
+        else:
+            where.set("this", new_where_expr)
 
         for join in tree.find_all(exp.Join):
             t = join.find(exp.Table)
             if t and t.name == target_table:
                 existing = join.args.get("on")
-                for cond in to_push:
-                    if existing:
-                        join.set("on", exp.And(this=existing, expression=cond))
-                        existing = join.args.get("on")
-                    else:
-                        join.set("on", cond)
+                combined: Expression = to_push[0]
+                for extra in to_push[1:]:
+                    combined = exp.And(this=combined, expression=extra)
+                if existing:
+                    join.set("on", exp.And(this=existing, expression=combined))
+                else:
+                    join.set("on", combined)
                 break
 
-        return tree.sql(dialect="postgres")
+        result = tree.sql(dialect="postgres", comments=True)
+        return hint_prefix + result if hint_prefix else result
 
     def _replace_subquery_with_join(self, sql: str, **_) -> str:
-        tree = sqlglot.parse_one(sql, dialect="postgres")
+        hint_prefix, clean_sql = self._split_hint(sql)
+        tree = sqlglot.parse_one(clean_sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE)
 
         for in_expr in list(tree.find_all(exp.In)):
             subquery = in_expr.args.get("query")
@@ -416,13 +434,11 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
 
             alias = f"sq_{inner_table.name}"
 
+            # FIX: Use exp.alias_ helper for correct node structure
+            aliased = exp.alias_(inner_table.copy(), alias)
+
             new_join = exp.Join(
-                this=exp.Alias(
-                    this=inner_table.copy(),
-                    alias=exp.TableAlias(
-                        this=exp.Identifier(this=alias)
-                    ),
-                ),
+                this=aliased,
                 on=exp.EQ(
                     this=outer_col.copy(),
                     expression=exp.Column(
@@ -445,16 +461,21 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
                         )
                     )
 
-            from_clause = tree.find(exp.From)
-            if from_clause and from_clause.parent:
-                from_clause.parent.append("joins", new_join)
+            select_node = tree.find(exp.Select)
+            if select_node:
+                existing_joins = select_node.args.get("joins") or []
+                select_node.set("joins", existing_joins + [new_join])
 
-            in_expr.pop()
+            # FIX: Replace in_expr with TRUE instead of popping it
+            in_expr.replace(exp.Boolean(this=True))
 
-        return tree.sql(dialect="postgres")
+        result = tree.sql(dialect="postgres", comments=True)
+        return hint_prefix + result if hint_prefix else result
 
     def _remove_redundant_join(self, sql: str, table: str, **_) -> str:
-        tree = sqlglot.parse_one(sql, dialect="postgres")
+        hint_prefix, clean_sql = self._split_hint(sql)
+
+        tree = sqlglot.parse_one(clean_sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE)
         used = {c.table for c in tree.find_all(exp.Column) if c.table}
 
         for join in tree.find_all(exp.Join):
@@ -465,24 +486,36 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
                 join.pop()
                 break
 
-        return tree.sql(dialect="postgres")
+        result = tree.sql(dialect="postgres", comments=True)
+        return hint_prefix + result if hint_prefix else result
 
     def _replace_select_star(self, sql: str, **_) -> str:
         if not self._db:
             return sql
-            
-        tree = sqlglot.parse_one(sql, dialect="postgres")
+
+        hint_prefix, clean_sql = self._split_hint(sql)
+        tree = sqlglot.parse_one(clean_sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE)
         if not tree.find(exp.Star):
             return sql
 
         explicit = []
+        top_level_tables = []
 
-        # Iterate over the table nodes to grab both name AND alias
-        for t in tree.find_all(exp.Table):
-            table_name = t.name
-            alias_name = t.alias if t.alias else table_name
-            
-            columns = self._db.get_column_names(table_name)
+        # FIX: Restrict table discovery to direct FROM/JOIN tables only
+        from_node = tree.find(exp.From)
+        if from_node:
+            for t in from_node.find_all(exp.Table):
+                top_level_tables.append(t)
+
+        for join in tree.find_all(exp.Join):
+            t = join.find(exp.Table)
+            if t:
+                top_level_tables.append(t)
+
+        for t in top_level_tables:
+            # FIX: t.alias is a plain string in sqlglot
+            alias_name = t.alias or t.name   
+            columns = self._db.get_column_names(t.name)
             for col_name in columns:
                 explicit.append(
                     exp.Column(
@@ -496,15 +529,38 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
             if select_node:
                 select_node.set("expressions", explicit)
 
-        return tree.sql(dialect="postgres")
+        result = tree.sql(dialect="postgres", comments=True)
+        return hint_prefix + result if hint_prefix else result
 
     def _materialize_cte(self, sql: str, cte_name: str = "", **_) -> str:
-        tree = sqlglot.parse_one(sql, dialect="postgres")
+        hint_prefix, clean_sql = self._split_hint(sql)
+
+        tree = sqlglot.parse_one(clean_sql, dialect="postgres", error_level=sqlglot.ErrorLevel.IGNORE)
         for cte in tree.find_all(exp.CTE):
             if not cte_name or cte.alias == cte_name:
-                cte.set("materialized", True)
+                # FIX: Set materialized directly on the CTE node, not the inner Select
+                if not cte.args.get("materialized"):
+                    cte.set("materialized", True)
                 break
-        return tree.sql(dialect="postgres")
+
+        result = tree.sql(dialect="postgres", comments=True)
+        return hint_prefix + result if hint_prefix else result
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # HINT COMMENT HELPERS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _split_hint(self, sql: str):
+        stripped = sql.strip()
+        if stripped.startswith("/*+"):
+            try:
+                closing = stripped.index("*/")
+                hint_prefix = stripped[: closing + 2] + "\n"
+                clean_sql   = stripped[closing + 2:].strip()
+                return hint_prefix, clean_sql
+            except ValueError:
+                pass
+        return "", stripped
 
     # ─────────────────────────────────────────────────────────────────────────
     # SIGNAL EXTRACTION

@@ -28,7 +28,7 @@ API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
-# Updated to use the docker-compose service name "postgres"
+# Uses the docker-compose service name "postgres"
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://sqlopt:sqlopt@postgres:5432/sqlopt")
 
 TASK_NAME    = "sql_optimization"
@@ -40,15 +40,17 @@ MAX_TOKENS   = 512
 # Score threshold to count episode as success (≥10% improvement)
 SUCCESS_SCORE_THRESHOLD = 0.1
 
-# The slow query the agent will try to optimize
-# Uses the sample DB seeded by docker-compose
+# ── UPDATED: Complex 5-table JOIN query to test pg_hint_plan actions ──
 SLOW_QUERY = textwrap.dedent("""
-    SELECT *
+    SELECT o.order_id, c.name, r.country, p.category, oi.quantity
     FROM orders o
     JOIN customers c ON o.customer_id = c.customer_id
     JOIN regions r ON c.region_id = r.region_id
+    JOIN order_items oi ON o.order_id = oi.order_id
+    JOIN products p ON oi.product_id = p.product_id
     WHERE o.status = 'completed'
     AND r.country = 'US'
+    AND p.price > 100
 """).strip()
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
