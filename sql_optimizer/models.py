@@ -109,7 +109,11 @@ def build_legal_actions(available_extensions: List[str]) -> List[Dict[str, Any]]
         {
             "action_id": action_id,
             "name": ACTION_REGISTRY[action_id]["name"],
-            "params_schema": ACTION_REGISTRY[action_id]["params_schema"],
+            # Stringify type objects so the schema is JSON-serializable
+            "params_schema": {
+                k: v.__name__ if isinstance(v, type) else str(v)
+                for k, v in ACTION_REGISTRY[action_id]["params_schema"].items()
+            },
             "description": ACTION_REGISTRY[action_id]["description"],
         }
         for action_id in get_legal_action_ids(available_extensions)
