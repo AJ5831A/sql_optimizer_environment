@@ -73,10 +73,21 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
         """
         Start a new optimization episode.
         """
-        query = kwargs.get("query", "")
-        db_url = kwargs.get("db_url", "")
+        # Defaults allow the env to run out-of-the-box on HF Spaces (and for
+        # automated health checks) without the caller needing to supply a DB.
+        # The bundled Postgres image ships a sample e-commerce schema.
+        default_db_url = os.getenv(
+            "DATABASE_URL",
+            "postgresql://sqlopt:sqlopt@localhost:5432/sqlopt",
+        )
+        default_query = (
+            "SELECT * FROM orders o "
+            "WHERE o.customer_id IN (SELECT id FROM customers WHERE region_id = 1)"
+        )
 
-        query = query.strip()
+        query = (kwargs.get("query") or default_query).strip()
+        db_url = kwargs.get("db_url") or default_db_url
+
         if not query:
             raise ValueError("query cannot be empty. Pass it via reset kwargs.")
         if not db_url:
