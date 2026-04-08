@@ -19,6 +19,7 @@ from sql_optimizer.models import (
     SQLAction,
     SQLObservation,
     SQLState,
+    build_legal_actions,
     get_action_name,
 )
 
@@ -102,19 +103,48 @@ class SQLOptimizerEnvironment(Environment[SQLAction, SQLObservation, SQLState]):
         if self._db:
             self._db.close()
 
-        # Connect — db.connect() probes for extensions internally
-        self._db = PostgreSQLExecutor(db_url)
-        self._db.connect()
-
-        self._available_extensions = self._db.available_extensions
-
-        # Reset episode state
+        # Reset episode state (done before connect so a failed connect still
+        # leaves the env in a consistent, queryable state).
         self._episode_id       = episode_id or str(uuid.uuid4())
         self._original_query   = query
         self._current_query    = query
         self._rewrites_applied = []
         self._step_count       = 0
         self._total_reward     = 0.0
+        self._baseline_time_ms = 0.0
+        self._current_time_ms  = 0.0
+        self._available_extensions = []
+        self._available_indexes = {}
+
+        # Try to connect. On HF Spaces (and automated health checks) the
+        # hosted container has no Postgres, so we degrade gracefully instead
+        # of 500-ing on POST /reset. Callers who pass a real db_url get the
+        # full experience; callers who don't get an empty observation with
+        # an explanatory metadata field and only the `submit` action legal.
+        try:
+            self._db = PostgreSQLExecutor(db_url)
+            self._db.connect()
+        except Exception as e:
+            print(f"[reset] DB unavailable ({e}); returning degraded observation.")
+            self._db = None
+            return SQLObservation(
+                current_query=query,
+                observation_vector=[],
+                legal_actions=build_legal_actions([]),
+                explain_plan={},
+                done=False,
+                reward=0.0,
+                metadata={
+                    "db_connected": False,
+                    "message": (
+                        "No Postgres reachable at db_url. Pass a valid "
+                        "`db_url` kwarg to reset() to enable full optimization. "
+                        "See README for details."
+                    ),
+                },
+            )
+
+        self._available_extensions = self._db.available_extensions
 
         # Discover indexes from pg_catalog
         self._available_indexes = self._db.get_available_indexes()

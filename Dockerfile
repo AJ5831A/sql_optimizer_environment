@@ -1,46 +1,28 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Self-contained Dockerfile for Hugging Face Spaces
+# Dockerfile for Hugging Face Spaces
 #
-# Bundles Postgres 16 + pg_hint_plan + the OpenEnv FastAPI server in a single
-# image so the Space works out of the box (HF Spaces runs one container per
-# Space and has no external DB).
+# Runs the OpenEnv FastAPI server. POST /reset succeeds even without a
+# database: the env returns a degraded observation with a clear message
+# explaining how to supply `db_url`. Real usage: pass a reachable Postgres
+# connection string via reset(db_url=...) to unlock full optimization.
 #
-# For local development prefer `docker-compose up` which uses the split
-# two-container layout (sql_optimizer/server/Dockerfile + db.Dockerfile).
+# For local development with a real Postgres, use `docker-compose up`.
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM postgres:16
+ARG BASE_IMAGE=python:3.11-slim
+FROM ${BASE_IMAGE}
 
-# ── System deps: Python + build tools + pg_hint_plan ────────────────────────
+# libpq for psycopg2, curl for healthcheck, gcc for wheel fallbacks
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv \
-        postgresql-16-pg-hint-plan \
         libpq-dev gcc curl && \
     rm -rf /var/lib/apt/lists/*
 
-# ── Postgres bootstrap ───────────────────────────────────────────────────────
-ENV POSTGRES_USER=sqlopt \
-    POSTGRES_PASSWORD=sqlopt \
-    POSTGRES_DB=sqlopt \
-    PGDATA=/var/lib/postgresql/data \
-    DATABASE_URL=postgresql://sqlopt:sqlopt@localhost:5432/sqlopt
-
-# Bake the sample schema into the initdb hook so it runs on first boot
-COPY sample_db_init.sql /docker-entrypoint-initdb.d/01_init.sql
-
-# ── Python app ───────────────────────────────────────────────────────────────
 WORKDIR /app
 
-COPY pyproject.toml ./
-COPY uv.lock* ./
-COPY sql_optimizer ./sql_optimizer
-COPY server ./server
-COPY client.py models.py __init__.py ./
-
-RUN python3 -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/venv/bin/pip install --no-cache-dir \
+# Install Python deps first for better layer caching
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
         "openenv-core[core]>=0.2.2" \
         "psycopg2-binary>=2.9.0" \
         "sqlglot>=23.0.0" \
@@ -48,17 +30,19 @@ RUN python3 -m venv /opt/venv && \
         "uvicorn[standard]>=0.20.0" \
         "pydantic>=2.0.0"
 
-ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONPATH="/app:$PYTHONPATH" \
-    PYTHONUNBUFFERED=1
+# Copy application code
+COPY pyproject.toml ./
+COPY sql_optimizer ./sql_optimizer
+COPY server ./server
+COPY client.py models.py __init__.py ./
 
-# ── Startup: boot Postgres, then the OpenEnv server ─────────────────────────
-COPY start.sh /usr/local/bin/start.sh
-RUN chmod +x /usr/local/bin/start.sh
+ENV PYTHONPATH="/app:$PYTHONPATH" \
+    PYTHONUNBUFFERED=1 \
+    PORT=8000
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/start.sh"]
+CMD ["uvicorn", "sql_optimizer.server.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
